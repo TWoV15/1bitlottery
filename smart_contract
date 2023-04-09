@@ -1,0 +1,455 @@
+pragma solidity ^0.8.0; // SPDX-License-Identifier: MIT
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "@chainlink/contracts/src/v0.8/VRFConsumerBase.sol";
+
+contract Lottery is VRFConsumerBase {
+     using SafeMath for uint256;
+    address[] public participants;
+    address public winner;
+    bytes32 public currentRequestId;
+    bytes32 internal keyHash;
+    uint256 internal fee;
+    uint256 public randomResult;
+    bool public isLotteryOpen;
+
+    IERC20 private _btcToken;
+    address private _owner;
+    uint256 private _ticketPrice = 105 * 10**14; // 0.0105 BTC
+    uint256 private _maxParticipants = 100;
+    uint256 private _prizePoolThreshold = 105 * 10**16; // 1.05 BTC
+    uint256 private _prizePool;
+    uint256 public prizesPerTransaction = 20;
+    uint256 public currentPrizeDistributionStep = 0;
+    uint256 private _maxTicketsPerParticipant = 30;
+    uint256 private randomIndex;
+    uint256 randomIndex1 = _generateRandomNumber();
+    uint256 winnerIndex = 100;
+    
+    struct Participant {
+        address participantAddress;
+        uint256 tickets;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == _owner, "Caller is not the owner");
+        _;
+    }
+
+    Participant[] private _participants;
+    mapping(address => uint256) private _tickets;
+
+    constructor(
+        address btcTokenAddress,
+        address vrfCoordinator,
+        address linkToken,
+        bytes32 _keyHash,
+        uint256 _fee
+    ) VRFConsumerBase(vrfCoordinator, linkToken) {
+        _btcToken = IERC20(btcTokenAddress);
+        _owner = msg.sender;
+        keyHash = _keyHash;
+        fee = _fee;
+    }
+
+    function requestRandomNumber() public returns (bytes32 requestId) {
+        require(LINK.balanceOf(address(this)) >= fee, "Not enough LINK tokens");
+        currentRequestId = requestRandomness(keyHash, fee);
+        return currentRequestId;
+    }
+    
+    function weiToBtc(uint256 weiAmount) public pure returns (uint256) {
+        return weiAmount.div(10**18);
+    }
+
+    function btcToWei(uint256 btcAmount) public pure returns (uint256) {
+        return btcAmount.mul(10**18);
+    }
+
+    function enterLottery(uint256 tickets) external {
+        require(tickets > 0, "At least one ticket must be purchased");
+        require(
+            _participants.length < _maxParticipants,
+            "Maximum participants reached"
+        );
+        require(
+            _tickets[msg.sender] == 0,
+            "You have already purchased tickets"
+        );
+        require(
+            _participants.length.add(1).mul(tickets) <=
+                _maxParticipants.mul(_maxTicketsPerParticipant),
+            "Not enough tickets left"
+        );
+
+        uint256 cost = _ticketPrice.mul(tickets);
+        _btcToken.transferFrom(msg.sender, address(this), cost);
+        _prizePool = _prizePool.add(cost);
+
+        _tickets[msg.sender] = _tickets[msg.sender].add(tickets);
+
+        _participants.push(Participant(msg.sender, tickets));
+
+        if (_prizePool >= _prizePoolThreshold) {
+            _startLottery1(); _startLottery2(); _startLottery3();_startLottery4(); _startLottery5(); _startLottery6();
+        }
+    }
+
+    function withdrawTokens(uint256 amount) external {
+        require(amount > 0, "Amount must be greater than zero");
+        require(
+            amount <= _btcToken.balanceOf(msg.sender),
+            "Insufficient balance"
+        );
+        require(
+            _tickets[msg.sender] == 0,
+            "Cannot withdraw tokens while participating in the lottery"
+        );
+
+        _btcToken.transfer(msg.sender, amount);
+    }
+
+    function cancelLotteryParticipation() external {
+        require(
+            _tickets[msg.sender] > 0,
+            "You are not participating in the lottery"
+        );
+
+        uint256 refundAmount = _ticketPrice.mul(_tickets[msg.sender]);
+        require(
+            refundAmount <= _btcToken.balanceOf(address(this)),
+            "Insufficient balance in prize pool"
+        );
+
+        _btcToken.transfer(msg.sender, refundAmount);
+
+        delete _tickets[msg.sender];
+
+        for (uint256 i = 0; i < _participants.length; i++) {
+            if (_participants[i].participantAddress == msg.sender) {
+                _participants[i] = _participants[_participants.length - 1];
+                _participants.pop();
+                break;
+            }
+        }
+    }
+
+    function _startLottery1() private {
+        require(
+            _prizePool >= _prizePoolThreshold,
+            "Prize pool threshold not reached"
+        );
+
+        Participant[] memory tempParticipants = new Participant[](
+            _participants.length
+        );
+        for (uint256 i = 0; i < _participants.length; i++) {
+            tempParticipants[i] = _participants[i];
+        }
+
+        uint256 superPrize = _prizePool.mul(5).div(100); // 5% of the prize pool
+        uint256 prizeFor69 = _prizePool.mul(90).div(100).div(69); // 90% of the prize pool divided by 69
+        uint256 prizeFor30 = _prizePool.mul(5).div(100).div(30); // 5% of the prize pool divided by 30
+
+        uint256 randomIndex1 = _generateRandomNumber() % tempParticipants.length;
+        _distributePrize(superPrize, randomIndex);
+
+
+        _distributePrize(superPrize, randomIndex);
+        randomIndex = _generateRandomNumber() % tempParticipants.length;
+
+        for (uint8 i = 1; i <= 69; i++) {
+            _distributePrize(prizeFor69, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        for (uint8 i = 1; i <= 30; i++) {
+            _distributePrize(prizeFor30, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        // Remove all participants from the array
+        for (uint256 i = 0; i < _participants.length; i++) {
+            delete _tickets[_participants[i].participantAddress];
+        }
+
+        // Reset the lottery
+        delete _participants;
+        _prizePool = 0;
+    }
+
+    function _startLottery2() private {
+        require(
+            _prizePool >= _prizePoolThreshold,
+            "Prize pool threshold not reached"
+        );
+
+        Participant[] memory tempParticipants = new Participant[](
+            _participants.length
+        );
+        for (uint256 i = 0; i < _participants.length; i++) {
+            tempParticipants[i] = _participants[i];
+        }
+
+        uint256 randomIndex2 = _generateRandomNumber() % tempParticipants.length;
+
+        uint256 superPrize = _prizePool.mul(5).div(100); // 5% of the prize pool
+        uint256 prizeFor699 = _prizePool.mul(90).div(100).div(699); // 90% of the prize pool divided by 699
+        uint256 prizeFor300 = _prizePool.mul(5).div(100).div(300); // 5% of the prize pool divided by 300
+
+        _distributePrize(superPrize, randomIndex);
+        randomIndex = _generateRandomNumber() % tempParticipants.length;
+
+        for (uint16 i = 1; i <= 699; i++) {
+            _distributePrize(prizeFor699, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        for (uint16 i = 1; i <= 300; i++) {
+            _distributePrize(prizeFor300, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        // Remove all participants from the array
+        for (uint256 i = 0; i < _participants.length; i++) {
+            delete _tickets[_participants[i].participantAddress];
+        }
+
+        // Reset the lottery
+        delete _participants;
+        _prizePool = 0;
+    }
+
+    function _startLottery3() private {
+        require(
+            _prizePool >= _prizePoolThreshold,
+            "Prize pool threshold not reached"
+        );
+
+        Participant[] memory tempParticipants = new Participant[](
+            _participants.length
+        );
+        for (uint256 i = 0; i < _participants.length; i++) {
+            tempParticipants[i] = _participants[i];
+        }
+
+        uint256 randomIndex3 = _generateRandomNumber() % tempParticipants.length;
+
+        uint256 superPrize = _prizePool.mul(5).div(100); // 5% of the prize pool
+        uint256 prizeFor50 = _prizePool.mul(90).div(100).div(50); // 90% of the prize pool divided by 50
+        uint256 prizeFor49 = _prizePool.mul(5).div(100).div(49); // 5% of the prize pool divided by 49
+
+        _distributePrize(superPrize, randomIndex);
+        randomIndex = _generateRandomNumber() % tempParticipants.length;
+
+        for (uint8 i = 1; i <= 50; i++) {
+            _distributePrize(prizeFor50, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        for (uint8 i = 1; i <= 49; i++) {
+            _distributePrize(prizeFor49, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        // Remove all participants from the array
+        for (uint256 i = 0; i < _participants.length; i++) {
+            delete _tickets[_participants[i].participantAddress];
+        }
+
+        // Reset the lottery
+        delete _participants;
+        _prizePool = 0;
+    }
+
+    function _startLottery4() private {
+        require(
+            _prizePool >= _prizePoolThreshold,
+            "Prize pool threshold not reached"
+        );
+
+        Participant[] memory tempParticipants = new Participant[](
+            _participants.length
+        );
+        for (uint256 i = 0; i < _participants.length; i++) {
+            tempParticipants[i] = _participants[i];
+        }
+
+        uint256 randomIndex4 = _generateRandomNumber() % tempParticipants.length;
+
+        uint256 firstPrize = _prizePool.mul(5).div(100); // 5% of the prize pool
+        uint256 prizeFor500 = _prizePool.mul(90).div(100).div(500); // 90% of the prize pool divided by 500
+        uint256 prizeFor499 = _prizePool.mul(5).div(100).div(499); // 5% of the prize pool divided by 499
+
+        _distributePrize(firstPrize, randomIndex);
+        randomIndex = _generateRandomNumber() % tempParticipants.length;
+
+        for (uint16 i = 1; i <= 500; i++) {
+            _distributePrize(prizeFor500, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        for (uint16 i = 1; i <= 499; i++) {
+            _distributePrize(prizeFor499, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        // Remove all participants from the array
+        for (uint256 i = 0; i < _participants.length; i++) {
+            delete _tickets[_participants[i].participantAddress];
+        }
+
+        // Reset the lottery
+        delete _participants;
+        _prizePool = 0;
+    }
+
+    function _startLottery5() private {
+        require(
+            _prizePool >= _prizePoolThreshold,
+            "Prize pool threshold not reached"
+        );
+
+        Participant[] memory tempParticipants = new Participant[](
+            _participants.length
+        );
+        for (uint256 i = 0; i < _participants.length; i++) {
+            tempParticipants[i] = _participants[i];
+        }
+
+        uint256 randomIndex5 = _generateRandomNumber() % tempParticipants.length;
+
+        uint256 firstPrize = _prizePool.mul(5).div(100); // 5% of the prize pool
+        uint256 prizeFor30 = _prizePool.mul(90).div(100).div(30); // 90% of the prize pool divided by 30
+        uint256 prizeFor69 = _prizePool.mul(5).div(100).div(69); // 5% of the prize pool divided by 69
+
+        _distributePrize(firstPrize, randomIndex);
+        randomIndex = _generateRandomNumber() % tempParticipants.length;
+
+        for (uint16 i = 1; i <= 30; i++) {
+            _distributePrize(prizeFor30, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        for (uint16 i = 1; i <= 69; i++) {
+            _distributePrize(prizeFor69, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        // Remove all participants from the array
+        for (uint256 i = 0; i < _participants.length; i++) {
+            delete _tickets[_participants[i].participantAddress];
+        }
+
+        // Reset the lottery
+        delete _participants;
+        _prizePool = 0;
+    }
+
+    function _startLottery6() private {
+        require(
+            _prizePool >= _prizePoolThreshold,
+            "Prize pool threshold not reached"
+        );
+
+        Participant[] memory tempParticipants = new Participant[](
+            _participants.length
+        );
+        for (uint256 i = 0; i < _participants.length; i++) {
+            tempParticipants[i] = _participants[i];
+        }
+
+        uint256 randomIndex6 = _generateRandomNumber() % tempParticipants.length;
+
+        uint256 firstPrize = _prizePool.mul(5).div(100); // 5% of the prize pool
+        uint256 prizeFor300 = _prizePool.mul(90).div(100).div(300); // 90% of the prize pool divided by 300
+        uint256 prizeFor699 = _prizePool.mul(5).div(100).div(699); // 5% of the prize pool divided by 699
+
+        _distributePrize(firstPrize, randomIndex);
+        randomIndex = _generateRandomNumber() % tempParticipants.length;
+
+        for (uint16 i = 1; i <= 300; i++) {
+            _distributePrize(prizeFor300, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        for (uint16 i = 1; i <= 699; i++) {
+            _distributePrize(prizeFor699, randomIndex);
+            randomIndex = _generateRandomNumber() % tempParticipants.length;
+        }
+
+        // Remove all participants from the array
+        for (uint256 i = 0; i < _participants.length; i++) {
+            delete _tickets[_participants[i].participantAddress];
+        }
+
+        // Reset the lottery
+        delete _participants;
+        _prizePool = 0;
+    }
+
+    function getRandomNumber() public onlyOwner returns (bytes32 requestId) {
+        require(LINK.balanceOf(address(this)) >= fee, "Not enough LINK tokens");
+        return requestRandomness(keyHash, fee);
+    }
+
+     function fulfillRandomness(bytes32 requestId, uint256 randomness) internal override {
+        require(requestId == currentRequestId, "Invalid request ID");
+        uint256 randomIndex1= randomness % participants.length;
+        winner = participants[randomIndex];
+     } 
+
+    function _distributePrize(uint256 prizeAmount) private {
+       Participant storage winnerParticipant = _participants[winnerIndex];
+        if (winner.tickets > 0) {
+            _btcToken.transfer(winner.wallet, prizeAmount);
+            winner.tickets = winner.tickets.sub(prizeAmount.div(_ticketPrice));
+            if (winner.tickets == 0) {
+                _participants[winnerIndex] = _participants[
+                    _participants.length - 1
+                ];
+                _participants.pop();
+            }
+        }
+    }
+
+    function distributeHalfPrizePool() external onlyOwner {
+        require(!isLotteryOpen, "Lottery is still open");
+
+        uint256 halfPrizePool = _prizePool.div(2);
+        uint256 numParticipants = _participants.length;
+        uint256 ticketsSold = _prizePool.div(_ticketPrice);
+
+        for (uint256 i = 0; i < numParticipants; i++) {
+            Participant storage participant = _participants[i];
+            uint256 payout = participant.tickets.mul(halfPrizePool).div(
+                ticketsSold
+            );
+            _btcToken.transfer(participant.wallet, payout);
+        }
+
+        _prizePool = _prizePool.sub(halfPrizePool);
+    }
+
+    function getParticipants() external view returns (Participant[] memory) {
+        return _participants;
+    }
+
+    function getParticipantTickets(address participant)
+        external
+        view
+        returns (uint256)
+    {
+        return _tickets[participant];
+    }
+
+    function getPrizePool() external view returns (uint256) {
+        return _prizePool;
+    }
+
+    function getTicketPrice() external view returns (uint256) {
+        return _ticketPrice;
+    }
+} 
